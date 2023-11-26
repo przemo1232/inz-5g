@@ -7,9 +7,10 @@ from func_timeout import func_timeout
 from func_timeout.exceptions import FunctionTimedOut
 import socket
 from config import net_xml
+import configparser
 
 def setup():
-    file = open('password.txt', 'r', encoding='utf-8')
+    file = open('../password.txt', 'r', encoding='utf-8')
     password = file.read()
     file.close()
     config = Config(overrides={'sudo': {'password': password}})
@@ -57,11 +58,38 @@ def setup():
     
     # setting up libvirt
     c.run('git clone https://github.com/KedArch/SOSKR5G')
-    net_xml.upload(t, 'SOSKR5G/test/net.xml')
-    with c.cd('SOSKR5G/test'):
-        try:
-            c.run('bash net.sh')
-        except UnexpectedExit:
-            pass
+    net_xml.upload(t, 'net.xml')
+    c.sudo('virsh net-define net.xml')
+    c.sudo('virsh net-autostart internal')
+    c.sudo('virsh net-start internal')
+    c.run('rm net.xml')
+    setup_docker(c)
+    print('complete')
+
+
+def setup_docker(c: Connection):
+    config_parser = configparser.ConfigParser()
+    configFilePath = 'config/config.cfg'
+    config_parser.read(configFilePath)
+    virsh_internal_ip_address = config_parser.get('network', 'virsh_internal_ip_address')
+    c.run('echo {\\"insecure-registries\\":[\\"'+virsh_internal_ip_address+':5000\\"]} >> docker_daemon.json')
+    c.sudo('mv docker_daemon.json /etc/docker/daemon.json')
+    c.sudo('service docker restart')
+    c.run('docker run -d -p 5000:5000 --name open5gs registry:latest')
+    with c.cd('SOSKR5G/Docker/'):
+        with c.cd('builder/'):
+            c.run('git clone https://github.com/KedArch/open5gs')
+            with c.cd('open5gs/'):
+                c.run('git checkout v2.6.0')
+        for image in 'baza builder amf ausf bsf nrf nssf pcf scp smf udm udr upf'.split():
+            with c.cd(f'{image}/'):
+                if image != 'baza': c.run(f'sed -i s\'/FROM /FROM {virsh_internal_ip_address}:5000\\//\' Dockerfile')
+                c.run(f'sed -i s\'/COPY --from=builder/COPY --from={virsh_internal_ip_address}:5000\\/builder/\' Dockerfile')
+            print(image)
+            c.run(f'docker build --tag {virsh_internal_ip_address}:5000/{image}:latest {image}')
+            c.run(f'docker push {virsh_internal_ip_address}:5000/{image}:latest')
+        c.run('mv builder/open5gs open5gs')
+        # c.run(f'docker build --tag {virsh_internal_ip_address}:5000/webui:latest -f open5gs/docker/webui/Dockerfile open5gs')
+        # c.run(f'docker push {virsh_internal_ip_address}:5000/webui:latest')
 
 setup()
